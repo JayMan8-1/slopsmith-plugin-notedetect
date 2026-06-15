@@ -15096,6 +15096,38 @@ function createNoteDetector(options = {}) {
         return _buildDiagnosticBasicGuitarPlayHtml(report, profile, missCauseHtml);
     }
 
+    // Dismiss the end-of-song summary and exit the player back to the launch
+    // screen (library/favorites). Detection is already silent-disabled at
+    // song end — do not call non-silent disable() here.
+    function _ndRunSummaryClose(overlay) {
+        if (overlay) {
+            try { overlay.remove(); } catch (_) { /* detached stub */ }
+        }
+        try {
+            const closeFn = (window.slopsmith && typeof window.slopsmith.closeCurrentSong === 'function')
+                ? window.slopsmith.closeCurrentSong.bind(window.slopsmith)
+                : (typeof window.closeCurrentSong === 'function' ? window.closeCurrentSong : null);
+            if (closeFn) {
+                Promise.resolve(closeFn()).catch((e) => {
+                    console.warn('[note_detect] back-to-library close failed:',
+                        e && e.message ? e.message : e);
+                });
+                return;
+            }
+            if (typeof window.showScreen === 'function') {
+                Promise.resolve(window.showScreen('home')).catch((e) => {
+                    console.warn('[note_detect] back-to-library showScreen failed:',
+                        e && e.message ? e.message : e);
+                });
+                return;
+            }
+            console.warn('[note_detect] back-to-library: no close helper available');
+        } catch (e) {
+            console.warn('[note_detect] back-to-library failed:',
+                e && e.message ? e.message : e);
+        }
+    }
+
     // Dismiss the end-of-song summary and replay the current song via the
     // core restart helper. Resets scoring for a fresh take and re-arms
     // detection when the user had Detect on — mirrors the playSong wrapper.
@@ -15306,7 +15338,7 @@ function createNoteDetector(options = {}) {
                         Play Again
                     </button>
                     <button class="nd-summary-close nd-btn">
-                        Close
+                        Back to Library
                     </button>
                 </div>
             </div>
@@ -15314,7 +15346,7 @@ function createNoteDetector(options = {}) {
             </div>
         `;
         const closeBtn = overlay.querySelector('.nd-summary-close');
-        if (closeBtn) closeBtn.onclick = () => overlay.remove();
+        if (closeBtn) closeBtn.onclick = () => _ndRunSummaryClose(overlay);
         const replayBtn = overlay.querySelector('.nd-summary-replay');
         if (replayBtn) {
             replayBtn.onclick = () => {
@@ -15927,6 +15959,7 @@ function createNoteDetector(options = {}) {
         // Play-again test hook — drives the summary replay path without a
         // browser click or enable()'s audio pipeline.
         _runSummaryPlayAgain: _ndRunSummaryPlayAgain,
+        _runSummaryClose: _ndRunSummaryClose,
         // XP-submission test hook — the natural path runs from
         // _endOfSongOnEnded, which tests can't reach without enable()'s
         // audio pipeline. Production code never calls this directly.

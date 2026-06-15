@@ -303,21 +303,83 @@ test('_applyNdSummaryContentFallbackStyles styles separated action buttons', () 
     assert.equal(closeBtn.style.cursor, 'pointer');
 });
 
-test('showSummary template includes Play Again and Close buttons', () => {
+test('showSummary template includes Play Again and Back to Library buttons', () => {
     const src = fs.readFileSync(SCREEN_JS, 'utf8');
     assert.match(src, /class="nd-summary-replay nd-btn nd-btn-primary"[\s\S]*?Play Again/);
-    assert.match(src, /class="nd-summary-close nd-btn"[\s\S]*?Close/);
+    assert.match(src, /class="nd-summary-close nd-btn"[\s\S]*?Back to Library/);
     assert.match(src, /\.nd-summary-replay/);
 });
 
-test('Close button still only removes overlay', () => {
+test('Back to Library button calls _ndRunSummaryClose', () => {
     const src = fs.readFileSync(SCREEN_JS, 'utf8');
-    assert.match(src, /closeBtn\.onclick\s*=\s*\(\)\s*=>\s*overlay\.remove\(\)/);
+    assert.match(src, /closeBtn\.onclick\s*=\s*\(\)\s*=>\s*_ndRunSummaryClose\(overlay\)/);
     assert.doesNotMatch(
         src,
         /closeBtn\.onclick[\s\S]{0,80}restartCurrentSong/,
-        'Close must not invoke restart',
+        'Back to Library must not invoke restart',
     );
+});
+
+test('backdrop click remains dismiss-only', () => {
+    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    assert.match(src, /overlay\.onclick\s*=\s*\(e\)\s*=>\s*\{\s*if\s*\(e\.target\s*===\s*overlay\)\s*overlay\.remove\(\)/);
+});
+
+test('Back to Library removes overlay and calls slopsmith.closeCurrentSong', () => {
+    const overlay = { removed: false, remove() { this.removed = true; } };
+    let closeCalls = 0;
+    let restartCalls = 0;
+    let playSongCalls = 0;
+    let clearLoopCalls = 0;
+    let enableCalls = 0;
+    const core = loadDetectionCore({
+        sandboxBeforeRun: (sb) => {
+            sb.slopsmith.closeCurrentSong = () => { closeCalls++; return Promise.resolve(); };
+            sb.slopsmith.restartCurrentSong = async () => { restartCalls++; return true; };
+            const orig = sb.playSong;
+            sb.playSong = async (...args) => { playSongCalls++; return orig(...args); };
+            sb.slopsmith.clearLoop = () => { clearLoopCalls++; };
+        },
+    });
+    const det = core.createNoteDetector({ isDefault: true });
+    det.enable = async () => { enableCalls++; return false; };
+    det._runSummaryClose(overlay);
+    assert.equal(overlay.removed, true);
+    assert.equal(closeCalls, 1);
+    assert.equal(restartCalls, 0);
+    assert.equal(playSongCalls, 0);
+    assert.equal(clearLoopCalls, 0);
+    assert.equal(enableCalls, 0);
+    det.destroy();
+});
+
+test('Back to Library falls back to window.closeCurrentSong', () => {
+    let closeCalls = 0;
+    const core = loadDetectionCore({
+        sandboxBeforeRun: (sb) => {
+            sb.slopsmith.closeCurrentSong = undefined;
+            sb.closeCurrentSong = () => { closeCalls++; return Promise.resolve(); };
+        },
+    });
+    const det = core.createNoteDetector();
+    det._runSummaryClose(null);
+    assert.equal(closeCalls, 1);
+    det.destroy();
+});
+
+test('Back to Library falls back to showScreen(home) when no close helper', () => {
+    let showScreenTarget = null;
+    const core = loadDetectionCore({
+        sandboxBeforeRun: (sb) => {
+            sb.slopsmith.closeCurrentSong = undefined;
+            sb.closeCurrentSong = undefined;
+            sb.showScreen = (id) => { showScreenTarget = id; return Promise.resolve(); };
+        },
+    });
+    const det = core.createNoteDetector();
+    det._runSummaryClose(null);
+    assert.equal(showScreenTarget, 'home');
+    det.destroy();
 });
 
 test('Play Again removes overlay, resets scoring, and calls slopsmith.restartCurrentSong', async () => {

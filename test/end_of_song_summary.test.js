@@ -322,7 +322,10 @@ test('Back to Library button calls _ndRunSummaryClose', () => {
 
 test('backdrop click remains dismiss-only', () => {
     const src = fs.readFileSync(SCREEN_JS, 'utf8');
-    assert.match(src, /overlay\.onclick\s*=\s*\(e\)\s*=>\s*\{\s*if\s*\(e\.target\s*===\s*overlay\)\s*overlay\.remove\(\)/);
+    // Backdrop (e.target === overlay) click only removes the overlay — it must
+    // not trigger Play Again / restart. The handler now also nulls the tracked
+    // overlay ref (overlay-teardown fix), so allow an optional braced body.
+    assert.match(src, /overlay\.onclick\s*=\s*\(e\)\s*=>\s*\{\s*if\s*\(e\.target\s*===\s*overlay\)\s*\{?\s*overlay\.remove\(\)/);
 });
 
 test('Back to Library removes overlay and calls slopsmith.closeCurrentSong', () => {

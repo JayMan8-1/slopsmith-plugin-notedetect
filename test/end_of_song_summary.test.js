@@ -98,10 +98,14 @@ test('song:ended on disabled default instance with active diagnostic still publi
     det._bindEndOfSongEvents();
     assert.equal(det.isEnabled(), false);
     core.slopsmith._fire('song:ended', {});
+    const session = events.find((e) => e.type === 'notedetect:session');
     assert.ok(
-        events.find((e) => e.type === 'notedetect:session'),
+        session,
         'diagnostic end handler should call showSummary even when host pre-disabled detection',
     );
+    // Zero-input session must NOT be reported as a full combo (hits 0/misses 0).
+    assert.equal(session.detail.fullCombo, false, 'zero-input take is not a full combo');
+    assert.equal(session.detail.hits, 0);
     det.destroy();
 });
 

@@ -1691,15 +1691,15 @@ function _renderDiagnosticMissCauseHtml(analysis) {
     let html = '<div class="nd-sum-miss-cause">'
         + '<div class="nd-sum-miss-cause-head">Why notes may have missed</div>';
     if (summary) {
-        html += `<div class="nd-sum-miss-cause-summary">${summary}</div>`;
+        html += `<div class="nd-sum-miss-cause-summary">${_ndEscapeHtml(summary)}</div>`;
     }
     for (const catId of Object.keys(categories)) {
         const c = categories[catId];
         if (!c) continue;
         html += '<div class="nd-sum-miss-cause-line">'
-            + `<span class="nd-sum-miss-cause-cat">${c.label}:</span> ${c.line}`;
+            + `<span class="nd-sum-miss-cause-cat">${_ndEscapeHtml(c.label)}:</span> ${_ndEscapeHtml(c.line)}`;
         if (c.nextStep) {
-            html += `<span class="nd-sum-miss-cause-next"> · Next: ${c.nextStep}</span>`;
+            html += `<span class="nd-sum-miss-cause-next"> · Next: ${_ndEscapeHtml(c.nextStep)}</span>`;
         }
         html += '</div>';
     }
@@ -2832,6 +2832,12 @@ function createNoteDetector(options = {}) {
     // Detect button and gates a single throttled re-acquire to recover.
     let _inputLost = false;
     let _lastInputRecover = 0;
+
+    // This instance's summary overlay (mounted on document.body, not under
+    // instanceRoot). Tracked so destroy() can reap it — otherwise a splitscreen
+    // panel torn down with its summary open would orphan a full-screen,
+    // pointer-capturing modal on the body with no owner to close it.
+    let _ndSummaryOverlayEl = null;
 
     // Calibration Wizard v2 — system setup only (safe settings; no scoring thresholds)
     let _calWizardEl = null;
@@ -12706,7 +12712,10 @@ function createNoteDetector(options = {}) {
                     bestStreak,
                     maxMultiplier,
                     grade: _ndGradeFor(accuracy),
-                    fullCombo: misses === 0,
+                    // At least one judgment required — a zero-input take (e.g. a
+                    // diagnostic that ran with no signal, which now reaches XP
+                    // submission via the summary-gate bypass) is not a full combo.
+                    fullCombo: misses === 0 && (hits + misses) > 0,
                 },
             });
             _fillSummaryXpRow(res);
@@ -13361,6 +13370,9 @@ function createNoteDetector(options = {}) {
         } catch (e) {}
         if (detectBtn) { detectBtn.remove(); detectBtn = null; }
         if (gearBtn) { gearBtn.remove(); gearBtn = null; }
+        // Reap this instance's body-mounted summary overlay (no longer a child
+        // of instanceRoot, so removing instanceRoot below won't take it).
+        if (_ndSummaryOverlayEl) { try { _ndSummaryOverlayEl.remove(); } catch (e) {} _ndSummaryOverlayEl = null; }
         if (instanceRoot.parentNode) instanceRoot.remove();
         _ndInstances.delete(api);
     }
@@ -15198,7 +15210,7 @@ function createNoteDetector(options = {}) {
         // Skin attribute mirrors the instance root's so the overlay (a
         // separate top-level nd root in the CSS) themes identically.
         try { overlay.setAttribute('data-nd-skin', _ndLoadSkin()); } catch (e) {}
-        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+        overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); _ndSummaryOverlayEl = null; } };
         // .nd-sum-shell wraps the (scrollable) panel so the hand-drawn frame
         // overlay (.nd-sum-frame) can sit absolutely over the panel's edges
         // without scrolling with the content.
@@ -15268,6 +15280,7 @@ function createNoteDetector(options = {}) {
         _applyNdSummaryOverlayShellStyles(overlay);
         if (opts && opts.startHidden) _hideNdSummaryOverlayShell(overlay);
         _ndSummaryOverlayMountNode().appendChild(overlay);
+        _ndSummaryOverlayEl = overlay;
         if (!(opts && opts.startHidden)) _animateSummary(overlay, overlay._ndReveal);
 
         publishToJournal(accuracy);
@@ -15407,7 +15420,11 @@ function createNoteDetector(options = {}) {
             score,
             maxMultiplier,
             grade: _ndGradeFor(accuracy),
-            fullCombo: misses === 0,
+            // Require at least one judgment — a zero-input session (hits 0,
+            // misses 0, e.g. a diagnostic that ran with no signal) is NOT a
+            // full combo. Without this guard it would publish fullCombo:true
+            // at 0% accuracy.
+            fullCombo: misses === 0 && (hits + misses) > 0,
             sections: sectionStats.map(s => ({
                 name: s.name,
                 accuracy: (s.hits + s.misses) > 0 ? Math.round(s.hits / (s.hits + s.misses) * 100) : 0,

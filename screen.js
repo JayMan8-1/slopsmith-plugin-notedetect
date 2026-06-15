@@ -1156,7 +1156,7 @@ function _applyNdSummaryContentFallbackStyles(overlay) {
         lineHeight: '1.2',
         minWidth: '6rem',
     };
-    for (const sel of ['.nd-summary-return-prev', '.nd-summary-close', '.nd-summary-download', '.nd-btn']) {
+    for (const sel of ['.nd-summary-return-prev', '.nd-summary-close', '.nd-summary-replay', '.nd-summary-download', '.nd-btn']) {
         _ndSummaryQueryAll(overlay, sel).forEach((btn) => {
             _ndAssignInlineStyles(btn, _btnBase);
         });
@@ -15096,6 +15096,62 @@ function createNoteDetector(options = {}) {
         return _buildDiagnosticBasicGuitarPlayHtml(report, profile, missCauseHtml);
     }
 
+    // Dismiss the end-of-song summary and replay the current song via the
+    // core restart helper. Resets scoring for a fresh take and re-arms
+    // detection when the user had Detect on — mirrors the playSong wrapper.
+    async function _ndRunSummaryPlayAgain(overlay) {
+        if (overlay) {
+            try { overlay.remove(); } catch (_) { /* detached stub */ }
+        }
+        try { resetScoring(); } catch (e) {
+            console.warn('[note_detect] play-again resetScoring failed:',
+                e && e.message ? e.message : e);
+        }
+        try {
+            const restartFn = (window.slopsmith && typeof window.slopsmith.restartCurrentSong === 'function')
+                ? window.slopsmith.restartCurrentSong.bind(window.slopsmith)
+                : (typeof window.restartCurrentSong === 'function' ? window.restartCurrentSong : null);
+            if (restartFn) {
+                const ok = await restartFn();
+                if (ok === false) {
+                    console.warn('[note_detect] play-again: restartCurrentSong returned false');
+                }
+            } else if (window.slopsmith && typeof window.slopsmith.seek === 'function') {
+                let target = 0;
+                if (typeof window.slopsmith.getLoop === 'function') {
+                    try {
+                        const loop = window.slopsmith.getLoop();
+                        if (loop && loop.loopA != null && loop.loopB != null) target = loop.loopA;
+                    } catch (_) { /* treat as no loop */ }
+                }
+                const r = await window.slopsmith.seek(target, 'song-restart');
+                if (r && r.completed === false) {
+                    console.warn('[note_detect] play-again: seek fallback returned incomplete');
+                    return;
+                }
+                const playing = !!(window.slopsmith && window.slopsmith.isPlaying);
+                if (!playing && typeof window.togglePlay === 'function') {
+                    await window.togglePlay();
+                }
+            } else {
+                console.warn('[note_detect] play-again: no restart helper available');
+            }
+        } catch (e) {
+            console.warn('[note_detect] play-again restart failed:',
+                e && e.message ? e.message : e);
+        }
+        // Re-arm only once — same guards as the playSong wrapper.
+        if (isDefault
+            && !(typeof window !== 'undefined' && window.__ndSuppressDefault)
+            && detectPreference
+            && !enabled) {
+            enable().catch((e) => {
+                console.warn('[note_detect] play-again re-enable failed:',
+                    e && e.message ? e.message : e);
+            });
+        }
+    }
+
     // Returns true if a summary overlay was created, false if it bailed
     // (fewer than 5 judgments) — callers deferring the summary use this
     // to know whether there is actually an overlay to reveal later.
@@ -15246,6 +15302,9 @@ function createNoteDetector(options = {}) {
                     <button class="nd-summary-download nd-btn nd-btn-primary">
                         Download Diagnostic JSON
                     </button>` : ''}
+                    <button type="button" class="nd-summary-replay nd-btn nd-btn-primary">
+                        Play Again
+                    </button>
                     <button class="nd-summary-close nd-btn">
                         Close
                     </button>
@@ -15256,6 +15315,15 @@ function createNoteDetector(options = {}) {
         `;
         const closeBtn = overlay.querySelector('.nd-summary-close');
         if (closeBtn) closeBtn.onclick = () => overlay.remove();
+        const replayBtn = overlay.querySelector('.nd-summary-replay');
+        if (replayBtn) {
+            replayBtn.onclick = () => {
+                _ndRunSummaryPlayAgain(overlay).catch((e) => {
+                    console.warn('[note_detect] play-again handler failed:',
+                        e && e.message ? e.message : e);
+                });
+            };
+        }
         const returnPrevBtn = overlay.querySelector('.nd-summary-return-prev');
         if (returnPrevBtn) {
             returnPrevBtn.onclick = () => {
@@ -15856,6 +15924,9 @@ function createNoteDetector(options = {}) {
         // bind from enableImpl() and unbind from destroy().
         _bindEndOfSongEvents: _endOfSongBindEvents,
         _unbindEndOfSongEvents: _endOfSongUnbindEvents,
+        // Play-again test hook — drives the summary replay path without a
+        // browser click or enable()'s audio pipeline.
+        _runSummaryPlayAgain: _ndRunSummaryPlayAgain,
         // XP-submission test hook — the natural path runs from
         // _endOfSongOnEnded, which tests can't reach without enable()'s
         // audio pipeline. Production code never calls this directly.

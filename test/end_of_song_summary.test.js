@@ -9,7 +9,11 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { loadDetectionCore } = require('./_loader');
+
+const SCREEN_JS = path.join(__dirname, '..', 'screen.js');
 
 test('_bindEndOfSongEvents() adds a song:ended listener on top of drill\'s', () => {
     // Contract: drill alone registers exactly one song:ended listener
@@ -240,6 +244,7 @@ function _makeSummaryOverlayDom() {
         }
         if (html && html.includes('actions')) {
             el.children.push(mk('button', 'nd-summary-return-prev nd-btn', null));
+            el.children.push(mk('button', 'nd-summary-replay nd-btn nd-btn-primary', null));
             el.children.push(mk('button', 'nd-summary-close nd-btn', null));
         }
         return el;
@@ -289,9 +294,164 @@ test('_applyNdSummaryContentFallbackStyles styles separated action buttons', () 
     assert.equal(actions.style.display, 'flex');
     assert.equal(actions.style.gap, '0.75rem');
     const returnBtn = overlay.querySelector('.nd-summary-return-prev');
+    const replayBtn = overlay.querySelector('.nd-summary-replay');
     const closeBtn = overlay.querySelector('.nd-summary-close');
     assert.ok(returnBtn);
+    assert.ok(replayBtn);
     assert.ok(closeBtn);
     assert.equal(returnBtn.style.borderRadius, '999px');
     assert.equal(closeBtn.style.cursor, 'pointer');
+});
+
+test('showSummary template includes Play Again and Close buttons', () => {
+    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    assert.match(src, /class="nd-summary-replay nd-btn nd-btn-primary"[\s\S]*?Play Again/);
+    assert.match(src, /class="nd-summary-close nd-btn"[\s\S]*?Close/);
+    assert.match(src, /\.nd-summary-replay/);
+});
+
+test('Close button still only removes overlay', () => {
+    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    assert.match(src, /closeBtn\.onclick\s*=\s*\(\)\s*=>\s*overlay\.remove\(\)/);
+    assert.doesNotMatch(
+        src,
+        /closeBtn\.onclick[\s\S]{0,80}restartCurrentSong/,
+        'Close must not invoke restart',
+    );
+});
+
+test('Play Again removes overlay, resets scoring, and calls slopsmith.restartCurrentSong', async () => {
+    const overlay = { removed: false, remove() { this.removed = true; } };
+    let restartCalls = 0;
+    let playSongCalls = 0;
+    let clearLoopCalls = 0;
+    const core = loadDetectionCore({
+        sandboxBeforeRun: (sb) => {
+            sb.slopsmith.restartCurrentSong = async () => { restartCalls++; return true; };
+            const orig = sb.playSong;
+            sb.playSong = async (...args) => { playSongCalls++; return orig(...args); };
+            sb.slopsmith.clearLoop = () => { clearLoopCalls++; };
+        },
+    });
+    const det = core.createNoteDetector({ isDefault: true });
+    for (let i = 0; i < 5; i++) det._recordJudgment(`k${i}`, _judgment(true));
+    assert.equal(det.getStats().hits, 5);
+    await det._runSummaryPlayAgain(overlay);
+    assert.equal(overlay.removed, true);
+    assert.equal(restartCalls, 1);
+    assert.equal(det.getStats().hits, 0);
+    assert.equal(playSongCalls, 0);
+    assert.equal(clearLoopCalls, 0);
+    det.destroy();
+});
+
+test('Play Again falls back to window.restartCurrentSong when slopsmith method absent', async () => {
+    let restartCalls = 0;
+    const core = loadDetectionCore({
+        sandboxBeforeRun: (sb) => {
+            sb.slopsmith.restartCurrentSong = undefined;
+            sb.restartCurrentSong = async () => { restartCalls++; return true; };
+        },
+    });
+    const det = core.createNoteDetector();
+    await det._runSummaryPlayAgain(null);
+    assert.equal(restartCalls, 1);
+    det.destroy();
+});
+
+test('Play Again seek fallback when restart helper missing', async () => {
+    let seekArgs = null;
+    let toggleCalls = 0;
+    let clearLoopCalls = 0;
+    const core = loadDetectionCore({
+        sandboxBeforeRun: (sb) => {
+            sb.slopsmith.restartCurrentSong = undefined;
+            sb.restartCurrentSong = undefined;
+            sb.slopsmith.isPlaying = false;
+            sb.slopsmith.seek = async (target, reason) => {
+                seekArgs = { target, reason };
+                return { completed: true };
+            };
+            sb.togglePlay = async () => { toggleCalls++; };
+            sb.slopsmith.clearLoop = () => { clearLoopCalls++; };
+        },
+    });
+    const det = core.createNoteDetector();
+    await det._runSummaryPlayAgain(null);
+    assert.deepEqual(seekArgs, { target: 0, reason: 'song-restart' });
+    assert.equal(toggleCalls, 1);
+    assert.equal(clearLoopCalls, 0);
+    det.destroy();
+});
+
+test('Play Again seek fallback uses loopA when loop is armed', async () => {
+    let seekTarget = null;
+    const core = loadDetectionCore({
+        sandboxBeforeRun: (sb) => {
+            sb.slopsmith._loop = { loopA: 15, loopB: 40 };
+            sb.slopsmith.restartCurrentSong = undefined;
+            sb.restartCurrentSong = undefined;
+            sb.slopsmith.isPlaying = true;
+            sb.slopsmith.seek = async (target) => {
+                seekTarget = target;
+                return { completed: true };
+            };
+        },
+    });
+    const det = core.createNoteDetector();
+    await det._runSummaryPlayAgain(null);
+    assert.equal(seekTarget, 15);
+    det.destroy();
+});
+
+test('Play Again does not start playback when seek fallback is incomplete', async () => {
+    let toggleCalls = 0;
+    const core = loadDetectionCore({
+        sandboxBeforeRun: (sb) => {
+            sb.slopsmith.restartCurrentSong = undefined;
+            sb.restartCurrentSong = undefined;
+            sb.slopsmith.seek = async () => ({ completed: false });
+            sb.togglePlay = async () => { toggleCalls++; };
+        },
+    });
+    const det = core.createNoteDetector();
+    await det._runSummaryPlayAgain(null);
+    assert.equal(toggleCalls, 0);
+    det.destroy();
+});
+
+test('Play Again re-arms detection using the same guards as playSong', () => {
+    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const block = src.slice(src.indexOf('async function _ndRunSummaryPlayAgain'));
+    assert.ok(block.length > 0);
+    assert.match(block, /isDefault[\s\S]*__ndSuppressDefault/);
+    assert.match(block, /detectPreference[\s\S]*!\s*enabled[\s\S]*enable\(\)/);
+    const playSongBlock = src.slice(src.indexOf('const wrapper = async function'));
+    assert.match(playSongBlock, /wantsDetect\(\)[\s\S]*!\s*def\.isEnabled\(\)[\s\S]*def\.enable\(\)/);
+});
+
+test('Play Again re-enable path is gated on isDefault', () => {
+    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const block = src.slice(src.indexOf('async function _ndRunSummaryPlayAgain'));
+    assert.match(block, /if\s*\(\s*isDefault/);
+});
+
+test('showSummary replaces existing overlay without duplicating', () => {
+    let removeCount = 0;
+    const existing = {
+        remove() { removeCount++; },
+    };
+    const core = loadDetectionCore({
+        sandboxBeforeRun: (sb) => {
+            sb.document.querySelector = (sel) => {
+                if (sel === '.nd-summary-overlay') return existing;
+                return null;
+            };
+        },
+    });
+    const det = core.createNoteDetector();
+    for (let i = 0; i < 5; i++) det._recordJudgment(`k${i}`, _judgment(true));
+    assert.equal(det.showSummary(), true);
+    assert.equal(removeCount, 1);
+    det.destroy();
 });
